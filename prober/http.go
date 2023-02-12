@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -40,16 +39,12 @@ import (
 	pconfig "github.com/prometheus/common/config"
 	"github.com/prometheus/common/version"
 	"golang.org/x/net/publicsuffix"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 
 	"github.com/prometheus/blackbox_exporter/config"
 )
 
-var caser = cases.Title(language.Und)
-
 func matchRegularExpressions(reader io.Reader, httpConfig config.HTTPProbe, logger log.Logger) bool {
-	body, err := ioutil.ReadAll(reader)
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		level.Error(logger).Log("msg", "Error reading HTTP body", "err", err)
 		return false
@@ -269,29 +264,20 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 			Help: "Response HTTP status code",
 		})
 
-		probeSSLEarliestCertExpiryGauge = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "probe_ssl_earliest_cert_expiry",
-			Help: "Returns earliest SSL cert expiry in unixtime",
-		})
+		probeSSLEarliestCertExpiryGauge = prometheus.NewGauge(sslEarliestCertExpiryGaugeOpts)
 
-		probeSSLLastChainExpiryTimestampSeconds = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "probe_ssl_last_chain_expiry_timestamp_seconds",
-			Help: "Returns last SSL chain expiry in timestamp seconds",
-		})
+		probeSSLLastChainExpiryTimestampSeconds = prometheus.NewGauge(sslChainExpiryInTimeStampGaugeOpts)
 
 		probeSSLLastInformation = prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "probe_ssl_last_chain_info",
 				Help: "Contains SSL leaf certificate information",
 			},
-			[]string{"fingerprint_sha256"},
+			[]string{"fingerprint_sha256", "subject", "issuer", "subjectalternative"},
 		)
 
 		probeTLSVersion = prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "probe_tls_version_info",
-				Help: "Contains the TLS version used",
-			},
+			probeTLSInfoGaugeOpts,
 			[]string{"version"},
 		)
 
@@ -335,11 +321,15 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 	targetHost := targetURL.Hostname()
 	targetPort := targetURL.Port()
 
-	ip, lookupTime, err := chooseProtocol(ctx, module.HTTP.IPProtocol, module.HTTP.IPProtocolFallback, targetHost, registry, logger)
-	durationGaugeVec.WithLabelValues("resolve").Add(lookupTime)
-	if err != nil {
-		level.Error(logger).Log("msg", "Error resolving address", "err", err)
-		return false
+	var ip *net.IPAddr
+	if !module.HTTP.SkipResolvePhaseWithProxy || module.HTTP.HTTPClientConfig.ProxyURL.URL == nil {
+		var lookupTime float64
+		ip, lookupTime, err = chooseProtocol(ctx, module.HTTP.IPProtocol, module.HTTP.IPProtocolFallback, targetHost, registry, logger)
+		durationGaugeVec.WithLabelValues("resolve").Add(lookupTime)
+		if err != nil {
+			level.Error(logger).Log("msg", "Error resolving address", "err", err)
+			return false
+		}
 	}
 
 	httpClientConfig := module.HTTP.HTTPClientConfig
@@ -352,7 +342,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		// its value instead. This helps avoid TLS handshake error
 		// if targetHost is an IP address.
 		for name, value := range httpConfig.Headers {
-			if caser.String(name) == "Host" {
+			if textproto.CanonicalMIMEHeaderKey(name) == "Host" {
 				httpClientConfig.TLSConfig.ServerName = value
 			}
 		}
@@ -396,16 +386,18 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		httpConfig.Method = "GET"
 	}
 
-	// Replace the host field in the URL with the IP we resolved.
 	origHost := targetURL.Host
-	if targetPort == "" {
-		if strings.Contains(ip.String(), ":") {
-			targetURL.Host = "[" + ip.String() + "]"
+	if ip != nil {
+		// Replace the host field in the URL with the IP we resolved.
+		if targetPort == "" {
+			if strings.Contains(ip.String(), ":") {
+				targetURL.Host = "[" + ip.String() + "]"
+			} else {
+				targetURL.Host = ip.String()
+			}
 		} else {
-			targetURL.Host = ip.String()
+			targetURL.Host = net.JoinHostPort(ip.String(), targetPort)
 		}
-	} else {
-		targetURL.Host = net.JoinHostPort(ip.String(), targetPort)
 	}
 
 	var body io.Reader
@@ -425,7 +417,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 	request = request.WithContext(ctx)
 
 	for key, value := range httpConfig.Headers {
-		if caser.String(key) == "Host" {
+		if textproto.CanonicalMIMEHeaderKey(key) == "Host" {
 			request.Host = value
 			continue
 		}
@@ -540,7 +532,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		}
 
 		if !requestErrored {
-			_, err = io.Copy(ioutil.Discard, byteCounter)
+			_, err = io.Copy(io.Discard, byteCounter)
 			if err != nil {
 				level.Info(logger).Log("msg", "Failed to read HTTP response body", "err", err)
 				success = false
@@ -638,7 +630,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		probeSSLEarliestCertExpiryGauge.Set(float64(getEarliestCertExpiry(resp.TLS).Unix()))
 		probeTLSVersion.WithLabelValues(getTLSVersion(resp.TLS)).Set(1)
 		probeSSLLastChainExpiryTimestampSeconds.Set(float64(getLastChainExpiry(resp.TLS).Unix()))
-		probeSSLLastInformation.WithLabelValues(getFingerprint(resp.TLS)).Set(1)
+		probeSSLLastInformation.WithLabelValues(getFingerprint(resp.TLS), getSubject(resp.TLS), getIssuer(resp.TLS), getDNSNames(resp.TLS)).Set(1)
 		if httpConfig.FailIfSSL {
 			level.Error(logger).Log("msg", "Final request was over SSL")
 			success = false
@@ -658,7 +650,7 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 func getDecompressionReader(algorithm string, origBody io.ReadCloser) (io.ReadCloser, error) {
 	switch strings.ToLower(algorithm) {
 	case "br":
-		return ioutil.NopCloser(brotli.NewReader(origBody)), nil
+		return io.NopCloser(brotli.NewReader(origBody)), nil
 
 	case "deflate":
 		return flate.NewReader(origBody), nil

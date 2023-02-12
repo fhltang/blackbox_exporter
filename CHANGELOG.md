@@ -1,4 +1,23 @@
-## 0.21.0-rc.0 / 2022-05-10
+## 0.23.0 / 2022-12-02
+
+* [SECURITY] Update Exporter Toolkit (CVE-2022-46146) #979
+* [FEATURE] Support multiple Listen Addresses and systemd socket activation #979
+* [FEATURE] Add leaf certificate details in a new `probe_ssl_last_chain_info` metric. #943
+* [FEATURE] DNS: Add `Add probe_dns_query_succeeded` metric. #990
+
+## 0.22.0 / 2022-08-02
+
+* [FEATURE] HTTP: Add `skip_resolve_phase_with_proxy` option. #944
+* [ENHANCEMENT] OAuth: Use Blackbox Exporter user agent when doing OAuth2
+  authenticated requests. #948
+* [ENHANCEMENT] Print usage and help to stdout instead of stderr. #928
+
+
+## 0.21.1 / 2022-06-17
+
+* [BUGFIX] Fix a data race in HTTP probes. #929
+
+## 0.21.0 / 2022-05-30
 
 This Prometheus release is built with go1.18, which contains two noticeable
 changes related to TLS and HTTP:

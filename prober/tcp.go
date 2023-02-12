@@ -89,26 +89,17 @@ func dialTCP(ctx context.Context, target string, module config.Module, registry 
 }
 
 func ProbeTCP(ctx context.Context, target string, module config.Module, registry *prometheus.Registry, logger log.Logger) bool {
-	probeSSLEarliestCertExpiry := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "probe_ssl_earliest_cert_expiry",
-		Help: "Returns earliest SSL cert expiry date",
-	})
-	probeSSLLastChainExpiryTimestampSeconds := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "probe_ssl_last_chain_expiry_timestamp_seconds",
-		Help: "Returns last SSL chain expiry in unixtime",
-	})
+	probeSSLEarliestCertExpiry := prometheus.NewGauge(sslEarliestCertExpiryGaugeOpts)
+	probeSSLLastChainExpiryTimestampSeconds := prometheus.NewGauge(sslChainExpiryInTimeStampGaugeOpts)
 	probeSSLLastInformation := prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "probe_ssl_last_chain_info",
 			Help: "Contains SSL leaf certificate information",
 		},
-		[]string{"fingerprint_sha256"},
+		[]string{"fingerprint_sha256", "subject", "issuer", "subjectalternative"},
 	)
 	probeTLSVersion := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "probe_tls_version_info",
-			Help: "Returns the TLS version used, or NaN when unknown",
-		},
+		probeTLSInfoGaugeOpts,
 		[]string{"version"},
 	)
 	probeFailedDueToRegex := prometheus.NewGauge(prometheus.GaugeOpts{
@@ -139,7 +130,7 @@ func ProbeTCP(ctx context.Context, target string, module config.Module, registry
 		probeSSLEarliestCertExpiry.Set(float64(getEarliestCertExpiry(&state).Unix()))
 		probeTLSVersion.WithLabelValues(getTLSVersion(&state)).Set(1)
 		probeSSLLastChainExpiryTimestampSeconds.Set(float64(getLastChainExpiry(&state).Unix()))
-		probeSSLLastInformation.WithLabelValues(getFingerprint(&state)).Set(1)
+		probeSSLLastInformation.WithLabelValues(getFingerprint(&state), getSubject(&state), getIssuer(&state), getDNSNames(&state)).Set(1)
 	}
 	scanner := bufio.NewScanner(conn)
 	for i, qr := range module.TCP.QueryResponse {
@@ -201,11 +192,11 @@ func ProbeTCP(ctx context.Context, target string, module config.Module, registry
 
 			// Get certificate expiry.
 			state := tlsConn.ConnectionState()
-			registry.MustRegister(probeSSLEarliestCertExpiry, probeSSLLastChainExpiryTimestampSeconds)
+			registry.MustRegister(probeSSLEarliestCertExpiry, probeTLSVersion, probeSSLLastChainExpiryTimestampSeconds, probeSSLLastInformation)
 			probeSSLEarliestCertExpiry.Set(float64(getEarliestCertExpiry(&state).Unix()))
 			probeTLSVersion.WithLabelValues(getTLSVersion(&state)).Set(1)
 			probeSSLLastChainExpiryTimestampSeconds.Set(float64(getLastChainExpiry(&state).Unix()))
-			probeSSLLastInformation.WithLabelValues(getFingerprint(&state)).Set(1)
+			probeSSLLastInformation.WithLabelValues(getFingerprint(&state), getSubject(&state), getIssuer(&state), getDNSNames(&state)).Set(1)
 		}
 	}
 	return true
